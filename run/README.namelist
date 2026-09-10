@@ -626,10 +626,15 @@ use_rap_aero_icbc                   = .false.   ! Set to .true. to ingest real-t
                                               Applies to RRTMG, Goddard, old Goddard and Dudhia schemes
  rad_cloud_ml_opt (max_dom)          = 0,   ! cloud-radiation ML residual correction option
                                               0: disabled (default) - no ML correction applied
-                                              1: stub enabled - hook active but returns zero corrections
-                                                 (Phase 1: scaffolding only, bit-identical to opt=0)
+                                              1: apply MLP residual (requires cloud_ml_sw_mlp.bin weight file)
+                                                 - If weight file missing: warn once, no corrections applied
+                                                 - If present: apply MLP to cloudy+daylight columns
+                                                   (coszen>0.1, column condensate>1e-6)
+                                                 - Features: qc_col, qi_col, cldmax, var_col=0, coszen, albedo
+                                                 - Outputs: dH_mean (uniform heating), dFlux corrections
                                               Note: requires ra_sw_physics = 4 (RRTMG) to have effect.
                                                     Applied after RRTMG SW but before heating rate accumulation.
+                                                    MLP: 2×32 hidden layers (ReLU), StandardScaler preprocessing.
 
  rad_cloud_ml_dump (max_dom)         = 0,   ! cloud-radiation ML training data dump option
                                               0: disabled (default) - no I/O, no behavior change

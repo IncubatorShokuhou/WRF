@@ -3,9 +3,22 @@ MODULE module_ra_cloud_ml
 ! ========================================================================
 ! module_ra_cloud_ml.F
 !
-! Purpose: Stub module for ML-based cloud-radiation residual corrections
+! Purpose: ML-based cloud-radiation residual corrections
 !          Phase 1: Empty hook that returns zero corrections
 !          Phase 1b: Optional training data dump
+!          Phase 2: MLP residual application (opt=1)
+!
+! MLP Architecture:
+!   Input: 6 features (qc_col, qi_col, cldmax, var_col, coszen, albedo)
+!   Hidden: 2 layers × 32 neurons (ReLU activation)
+!   Output: 5 targets (dH_mean, dSWDNB, dSWUPB, dSWDNT, dSWUPT)
+!   Preprocessing: StandardScaler (mean, scale)
+!
+! Weight file: cloud_ml_sw_mlp.bin (float64 little-endian)
+!   Order: mean[6], scale[6], W0[6,32], b0[32], W1[32,32], b1[32], W2[32,5], b2[5]
+!   Total: 1457 float64 values
+!
+! Forward pass: h0=(x-mean)/scale; h1=relu(h0@W0+b0); h2=relu(h1@W1+b1); y=h2@W2+b2
 !
 ! Author: Cloud Agent
 ! Date: 2026-09-10
@@ -16,17 +29,37 @@ IMPLICIT NONE
 PRIVATE
 PUBLIC :: cloud_ml_sw_residual
 
+! MLP architecture parameters
+INTEGER, PARAMETER :: N_FEATURES = 6
+INTEGER, PARAMETER :: N_HIDDEN1 = 32
+INTEGER, PARAMETER :: N_HIDDEN2 = 32
+INTEGER, PARAMETER :: N_OUTPUTS = 5
+INTEGER, PARAMETER :: N_WEIGHTS = 1457  ! Total float64 values
+
+! MLP weights (saved between calls)
+REAL(8), DIMENSION(N_FEATURES), SAVE :: mlp_mean, mlp_scale
+REAL(8), DIMENSION(N_FEATURES,N_HIDDEN1), SAVE :: mlp_W0
+REAL(8), DIMENSION(N_HIDDEN1), SAVE :: mlp_b0
+REAL(8), DIMENSION(N_HIDDEN1,N_HIDDEN2), SAVE :: mlp_W1
+REAL(8), DIMENSION(N_HIDDEN2), SAVE :: mlp_b1
+REAL(8), DIMENSION(N_HIDDEN2,N_OUTPUTS), SAVE :: mlp_W2
+REAL(8), DIMENSION(N_OUTPUTS), SAVE :: mlp_b2
+
+LOGICAL, SAVE :: weights_loaded = .FALSE.
+LOGICAL, SAVE :: load_failed = .FALSE.
+
 CONTAINS
 
 ! ========================================================================
 ! SUBROUTINE cloud_ml_sw_residual
 !
 ! Purpose: Apply ML-based shortwave residual correction after RRTMG
-!          Currently a no-op stub returning zero corrections
+!          opt=0: no-op
+!          opt=1: apply MLP residual if weights present, else warn and no-op
 !          Optionally dump training data when rad_cloud_ml_dump=1
 !
 ! Arguments:
-!   rad_cloud_ml_opt  - option flag (0=off, 1=stub active but returns zeros)
+!   rad_cloud_ml_opt  - option flag (0=off, 1=apply MLP residual)
 !   rad_cloud_ml_dump - dump flag (0=off, 1=dump training pairs)
 !   itimestep         - current timestep number
 !   id                - domain id
@@ -121,19 +154,37 @@ SUBROUTINE cloud_ml_sw_residual(                                         &
       first_dump = .FALSE.
    ENDIF
 
-   ! Phase 1 stub: do nothing, return immediately
+   ! Phase 2: MLP residual application
    IF (rad_cloud_ml_opt == 0) THEN
       ! Option disabled - immediate return
       RETURN
    ENDIF
 
    IF (rad_cloud_ml_opt == 1) THEN
-      ! Option enabled but stub only - log once and return
-      IF (first_call) THEN
-         WRITE(*,*) 'cloud_ml_sw_residual: opt=1 stub active (returns zeros)'
-         first_call = .FALSE.
+      ! Load weights on first call
+      IF (.NOT. weights_loaded .AND. .NOT. load_failed) THEN
+         CALL load_mlp_weights()
+         IF (first_call) THEN
+            IF (weights_loaded) THEN
+               WRITE(*,*) 'cloud_ml_sw_residual: opt=1 MLP weights loaded, applying residuals'
+            ELSE
+               WRITE(*,*) 'cloud_ml_sw_residual: opt=1 weight file missing, no corrections applied'
+            ENDIF
+            first_call = .FALSE.
+         ENDIF
       ENDIF
-      ! Return zero corrections (no-op)
+      
+      ! Apply MLP residuals if weights available
+      IF (weights_loaded) THEN
+         CALL apply_mlp_residuals(                                       &
+              ids,ide, jds,jde, kds,kde,                                 &
+              ims,ime, jms,jme, kms,kme,                                 &
+              its,ite, jts,jte, kts,kte,                                 &
+              qc3d, qi3d, qs3d, cldfra3d,                                &
+              coszr, albedo,                                             &
+              rthratensw, swdnb, swupb, swdnt, swupt, gsw                &
+              )
+      ENDIF
       RETURN
    ENDIF
 
@@ -283,5 +334,266 @@ SUBROUTINE dump_training_data(                                           &
    WRITE(*,*) 'cloud_ml_dump: Wrote ', TRIM(filename)
 
 END SUBROUTINE dump_training_data
+
+! ========================================================================
+! SUBROUTINE load_mlp_weights
+!
+! Purpose: Load MLP weights from binary file
+!          File: cloud_ml_sw_mlp.bin (float64 little-endian)
+!          Order: mean[6], scale[6], W0[6,32], b0[32], W1[32,32], b1[32], W2[32,5], b2[5]
+!
+! Sets module variables: weights_loaded, load_failed
+! ========================================================================
+SUBROUTINE load_mlp_weights()
+
+   IMPLICIT NONE
+
+   CHARACTER(LEN=256), PARAMETER :: weight_file = 'cloud_ml_sw_mlp.bin'
+   INTEGER :: iunit, ierr, ios
+   REAL(8), DIMENSION(N_WEIGHTS) :: weight_buffer
+   INTEGER :: idx, i, j
+
+   ! Try to open weight file
+   iunit = 99
+   OPEN(UNIT=iunit, FILE=weight_file, FORM='UNFORMATTED', &
+        ACCESS='STREAM', STATUS='OLD', IOSTAT=ios)
+   
+   IF (ios /= 0) THEN
+      ! File not found
+      load_failed = .TRUE.
+      weights_loaded = .FALSE.
+      RETURN
+   ENDIF
+
+   ! Read all weights as flat buffer
+   READ(iunit, IOSTAT=ios) weight_buffer
+   CLOSE(iunit)
+
+   IF (ios /= 0) THEN
+      WRITE(*,*) 'WARNING: cloud_ml: Failed to read weight file'
+      load_failed = .TRUE.
+      weights_loaded = .FALSE.
+      RETURN
+   ENDIF
+
+   ! Unpack weights from buffer
+   idx = 1
+   
+   ! mean[6]
+   mlp_mean(:) = weight_buffer(idx:idx+N_FEATURES-1)
+   idx = idx + N_FEATURES
+   
+   ! scale[6]
+   mlp_scale(:) = weight_buffer(idx:idx+N_FEATURES-1)
+   idx = idx + N_FEATURES
+   
+   ! W0[6,32] - column-major in buffer
+   DO j = 1, N_HIDDEN1
+      DO i = 1, N_FEATURES
+         mlp_W0(i,j) = weight_buffer(idx)
+         idx = idx + 1
+      END DO
+   END DO
+   
+   ! b0[32]
+   mlp_b0(:) = weight_buffer(idx:idx+N_HIDDEN1-1)
+   idx = idx + N_HIDDEN1
+   
+   ! W1[32,32]
+   DO j = 1, N_HIDDEN2
+      DO i = 1, N_HIDDEN1
+         mlp_W1(i,j) = weight_buffer(idx)
+         idx = idx + 1
+      END DO
+   END DO
+   
+   ! b1[32]
+   mlp_b1(:) = weight_buffer(idx:idx+N_HIDDEN2-1)
+   idx = idx + N_HIDDEN2
+   
+   ! W2[32,5]
+   DO j = 1, N_OUTPUTS
+      DO i = 1, N_HIDDEN2
+         mlp_W2(i,j) = weight_buffer(idx)
+         idx = idx + 1
+      END DO
+   END DO
+   
+   ! b2[5]
+   mlp_b2(:) = weight_buffer(idx:idx+N_OUTPUTS-1)
+
+   weights_loaded = .TRUE.
+   load_failed = .FALSE.
+
+END SUBROUTINE load_mlp_weights
+
+! ========================================================================
+! SUBROUTINE mlp_forward
+!
+! Purpose: MLP forward pass (2×32 hidden layers, ReLU)
+!          Forward: h0=(x-mean)/scale; h1=relu(h0@W0+b0); h2=relu(h1@W1+b1); y=h2@W2+b2
+!
+! Input: features[N_FEATURES]
+! Output: outputs[N_OUTPUTS]
+! ========================================================================
+SUBROUTINE mlp_forward(features, outputs)
+
+   IMPLICIT NONE
+
+   REAL(8), DIMENSION(N_FEATURES), INTENT(IN) :: features
+   REAL(8), DIMENSION(N_OUTPUTS), INTENT(OUT) :: outputs
+
+   REAL(8), DIMENSION(N_FEATURES) :: h0
+   REAL(8), DIMENSION(N_HIDDEN1) :: h1
+   REAL(8), DIMENSION(N_HIDDEN2) :: h2
+   INTEGER :: i, j
+
+   ! Input normalization: h0 = (x - mean) / scale
+   DO i = 1, N_FEATURES
+      h0(i) = (features(i) - mlp_mean(i)) / mlp_scale(i)
+   END DO
+
+   ! First hidden layer: h1 = relu(h0 @ W0 + b0)
+   DO j = 1, N_HIDDEN1
+      h1(j) = mlp_b0(j)
+      DO i = 1, N_FEATURES
+         h1(j) = h1(j) + h0(i) * mlp_W0(i,j)
+      END DO
+      h1(j) = MAX(0.0_8, h1(j))  ! ReLU
+   END DO
+
+   ! Second hidden layer: h2 = relu(h1 @ W1 + b1)
+   DO j = 1, N_HIDDEN2
+      h2(j) = mlp_b1(j)
+      DO i = 1, N_HIDDEN1
+         h2(j) = h2(j) + h1(i) * mlp_W1(i,j)
+      END DO
+      h2(j) = MAX(0.0_8, h2(j))  ! ReLU
+   END DO
+
+   ! Output layer: y = h2 @ W2 + b2
+   DO j = 1, N_OUTPUTS
+      outputs(j) = mlp_b2(j)
+      DO i = 1, N_HIDDEN2
+         outputs(j) = outputs(j) + h2(i) * mlp_W2(i,j)
+      END DO
+   END DO
+
+END SUBROUTINE mlp_forward
+
+! ========================================================================
+! SUBROUTINE apply_mlp_residuals
+!
+! Purpose: Apply MLP residuals to cloudy+daylight columns
+!
+! For each column with coszr > 0.1 and column condensate > 1e-6:
+!   1. Extract 6 features: qc_col, qi_col, cldmax, var_col=0, coszen, albedo
+!   2. Run MLP forward
+!   3. Apply outputs: dH_mean (uniform to rthratensw), dFluxes (to SW fluxes)
+!   4. Update gsw = swdnb - swupb
+!
+! Feature order (matching training export):
+!   [0] qc_col = sum_k qc(i,k,j)
+!   [1] qi_col = sum_k qi(i,k,j)
+!   [2] cldmax = max_k cldfra(i,k,j)
+!   [3] var_col = 0.0 (subgrid variance not available online)
+!   [4] coszen = coszr(i,j)
+!   [5] albedo = albedo(i,j)
+!
+! Output order:
+!   [0] dH_mean   - uniform heating increment (K/s)
+!   [1] dSWDNB    - bottom downwelling flux increment (W/m2)
+!   [2] dSWUPB    - bottom upwelling flux increment (W/m2)
+!   [3] dSWDNT    - top downwelling flux increment (W/m2)
+!   [4] dSWUPT    - top upwelling flux increment (W/m2)
+! ========================================================================
+SUBROUTINE apply_mlp_residuals(                                          &
+       ids,ide, jds,jde, kds,kde,                                        &
+       ims,ime, jms,jme, kms,kme,                                        &
+       its,ite, jts,jte, kts,kte,                                        &
+       qc3d, qi3d, qs3d, cldfra3d,                                       &
+       coszr, albedo,                                                    &
+       rthratensw, swdnb, swupb, swdnt, swupt, gsw                       &
+       )
+
+   IMPLICIT NONE
+
+   INTEGER, INTENT(IN) :: ids,ide, jds,jde, kds,kde
+   INTEGER, INTENT(IN) :: ims,ime, jms,jme, kms,kme
+   INTEGER, INTENT(IN) :: its,ite, jts,jte, kts,kte
+   
+   REAL, DIMENSION(ims:ime,kms:kme,jms:jme), INTENT(IN) :: &
+        qc3d, qi3d, qs3d, cldfra3d
+   
+   REAL, DIMENSION(ims:ime,jms:jme), INTENT(IN) :: coszr, albedo
+   
+   REAL, DIMENSION(ims:ime,kms:kme,jms:jme), INTENT(INOUT) :: rthratensw
+   
+   REAL, DIMENSION(ims:ime,jms:jme), INTENT(INOUT) :: &
+        swdnb, swupb, swdnt, swupt, gsw
+
+   ! Local variables
+   REAL, PARAMETER :: COSZEN_MIN = 0.1
+   REAL, PARAMETER :: CLOUD_MIN = 1.0E-6
+   REAL(8), DIMENSION(N_FEATURES) :: features
+   REAL(8), DIMENSION(N_OUTPUTS) :: mlp_outputs
+   REAL :: qc_col, qi_col, qs_col, cldmax, total_cloud
+   INTEGER :: i, j, k
+
+   ! Loop over tile columns
+   DO j = jts, jte
+      DO i = its, ite
+         
+         ! Check daylight condition
+         IF (coszr(i,j) <= COSZEN_MIN) CYCLE
+         
+         ! Extract column features
+         qc_col = 0.0
+         qi_col = 0.0
+         qs_col = 0.0
+         cldmax = 0.0
+         
+         DO k = kts, kte
+            qc_col = qc_col + qc3d(i,k,j)
+            qi_col = qi_col + qi3d(i,k,j)
+            qs_col = qs_col + qs3d(i,k,j)
+            cldmax = MAX(cldmax, cldfra3d(i,k,j))
+         END DO
+         
+         total_cloud = qc_col + qi_col + qs_col
+         
+         ! Check cloudy condition
+         IF (total_cloud <= CLOUD_MIN) CYCLE
+         
+         ! Build feature vector (matching training export order)
+         features(1) = REAL(qc_col, 8)
+         features(2) = REAL(qi_col, 8)
+         features(3) = REAL(cldmax, 8)
+         features(4) = 0.0_8  ! var_col placeholder (not available online)
+         features(5) = REAL(coszr(i,j), 8)
+         features(6) = REAL(albedo(i,j), 8)
+         
+         ! Run MLP forward
+         CALL mlp_forward(features, mlp_outputs)
+         
+         ! Apply outputs
+         ! [0] dH_mean: uniform heating increment to all levels
+         DO k = kts, kte
+            rthratensw(i,k,j) = rthratensw(i,k,j) + REAL(mlp_outputs(1), 4)
+         END DO
+         
+         ! [1-4] Flux increments
+         swdnb(i,j) = swdnb(i,j) + REAL(mlp_outputs(2), 4)
+         swupb(i,j) = swupb(i,j) + REAL(mlp_outputs(3), 4)
+         swdnt(i,j) = swdnt(i,j) + REAL(mlp_outputs(4), 4)
+         swupt(i,j) = swupt(i,j) + REAL(mlp_outputs(5), 4)
+         
+         ! Update GSW
+         gsw(i,j) = swdnb(i,j) - swupb(i,j)
+         
+      END DO
+   END DO
+
+END SUBROUTINE apply_mlp_residuals
 
 END MODULE module_ra_cloud_ml
