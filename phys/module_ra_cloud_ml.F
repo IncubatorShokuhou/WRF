@@ -3,10 +3,11 @@ MODULE module_ra_cloud_ml
 ! ========================================================================
 ! module_ra_cloud_ml.F
 !
-! Purpose: ML-based cloud-radiation residual corrections
+! Purpose: ML-based cloud-radiation residual corrections with energy closure
 !          Phase 1: Empty hook that returns zero corrections
 !          Phase 1b: Optional training data dump
 !          Phase 2: MLP residual application (opt=1)
+!          Phase 3: Energy closure via flux scaling
 !
 ! MLP Architecture:
 !   Input: 6 features (qc_col, qi_col, cldmax, var_col, coszen, albedo)
@@ -14,7 +15,14 @@ MODULE module_ra_cloud_ml
 !   Output: 5 targets (dH_mean, dSWDNB, dSWUPB, dSWDNT, dSWUPT)
 !   Preprocessing: StandardScaler (mean, scale)
 !
-! Weight file: cloud_ml_sw_mlp.bin (float64 little-endian)
+! Energy Closure:
+!   - Heating applied uniformly: rthratensw += dH_mean (preserves mass-weighted mean)
+!   - Flux increments scaled to match heating: α = dH_mean / dH_flux
+!   - dH_flux = ΔF_net / (cp * M), where M = sum(rho*dz), ΔF = (SWDNT-SWUPT) - (SWDNB-SWUPB)
+!   - Scaling clamped to [0.25, 4] to avoid extreme rescaling
+!   - Ensures column energy consistency between heating rate and net flux change
+!
+! Weight file: cloud_ml_sw_mlp.bin (float64 little-endian, C/row-major order)
 !   Order: mean[6], scale[6], W0[6,32], b0[32], W1[32,32], b1[32], W2[32,5], b2[5]
 !   Total: 1457 float64 values
 !
@@ -191,6 +199,7 @@ SUBROUTINE cloud_ml_sw_residual(                                         &
               ims,ime, jms,jme, kms,kme,                                 &
               its,ite, jts,jte, kts,kte,                                 &
               qc3d, qi3d, qs3d, cldfra3d,                                &
+              rho3d, dz8w,                                               &
               coszr, albedo,                                             &
               rthratensw, swdnb, swupb, swdnt, swupt, gsw                &
               )
@@ -537,13 +546,23 @@ END SUBROUTINE mlp_forward
 ! ========================================================================
 ! SUBROUTINE apply_mlp_residuals
 !
-! Purpose: Apply MLP residuals to cloudy+daylight columns
+! Purpose: Apply MLP residuals to cloudy+daylight columns with energy closure
 !
 ! For each column with coszr > 0.1 and column condensate > 1e-6:
 !   1. Extract 6 features: qc_col, qi_col, cldmax, var_col=0, coszen, albedo
 !   2. Run MLP forward
-!   3. Apply outputs: dH_mean (uniform to rthratensw), dFluxes (to SW fluxes)
-!   4. Update gsw = swdnb - swupb
+!   3. Apply heating: dH_mean uniformly to all levels (preserves mass-weighted mean)
+!   4. Apply flux closure: scale flux increments so net column energy change
+!      matches applied heating (energy consistency)
+!   5. Update gsw = swdnb - swupb
+!
+! Energy Closure (flux scaling):
+!   - Compute net flux change: ΔF0 = (dSWDNT-dSWUPT) - (dSWDNB-dSWUPB)
+!   - Compute column mass: M = sum_k(rho*dz)
+!   - Implied heating from fluxes: dH_from_flux0 = ΔF0 / (cp * M)
+!   - Scaling factor: α = dH_mean / dH_from_flux0 (clamped to [0.25, 4])
+!   - Applied fluxes: sw* += α * dSW*
+!   - This ensures column energy consistency between heating and flux increments
 !
 ! Feature order (matching training export):
 !   [0] qc_col = sum_k qc(i,k,j)
@@ -565,6 +584,7 @@ SUBROUTINE apply_mlp_residuals(                                          &
        ims,ime, jms,jme, kms,kme,                                        &
        its,ite, jts,jte, kts,kte,                                        &
        qc3d, qi3d, qs3d, cldfra3d,                                       &
+       rho3d, dz8w,                                                      &
        coszr, albedo,                                                    &
        rthratensw, swdnb, swupb, swdnt, swupt, gsw                       &
        )
@@ -576,7 +596,7 @@ SUBROUTINE apply_mlp_residuals(                                          &
    INTEGER, INTENT(IN) :: its,ite, jts,jte, kts,kte
    
    REAL, DIMENSION(ims:ime,kms:kme,jms:jme), INTENT(IN) :: &
-        qc3d, qi3d, qs3d, cldfra3d
+        qc3d, qi3d, qs3d, cldfra3d, rho3d, dz8w
    
    REAL, DIMENSION(ims:ime,jms:jme), INTENT(IN) :: coszr, albedo
    
@@ -588,9 +608,17 @@ SUBROUTINE apply_mlp_residuals(                                          &
    ! Local variables
    REAL, PARAMETER :: COSZEN_MIN = 0.1
    REAL, PARAMETER :: CLOUD_MIN = 1.0E-6
+   REAL, PARAMETER :: CP = 1004.5  ! J/(kg*K) - specific heat at constant pressure
+   REAL, PARAMETER :: ALPHA_MIN = 0.25
+   REAL, PARAMETER :: ALPHA_MAX = 4.0
+   REAL, PARAMETER :: MASS_MIN = 1.0E-6  ! kg/m2 - minimum column mass
+   REAL, PARAMETER :: TINY = 1.0E-12
+   
    REAL(8), DIMENSION(N_FEATURES) :: features
    REAL(8), DIMENSION(N_OUTPUTS) :: mlp_outputs
    REAL :: qc_col, qi_col, qs_col, cldmax, total_cloud
+   REAL :: column_mass, dF_net, dH_from_flux, alpha
+   REAL :: dH_mean, dSWDNB, dSWUPB, dSWDNT, dSWUPT
    INTEGER :: i, j, k
 
    ! Loop over tile columns
@@ -629,17 +657,51 @@ SUBROUTINE apply_mlp_residuals(                                          &
          ! Run MLP forward
          CALL mlp_forward(features, mlp_outputs)
          
-         ! Apply outputs
-         ! [0] dH_mean: uniform heating increment to all levels
+         ! Extract outputs
+         dH_mean = REAL(mlp_outputs(1), 4)
+         dSWDNB = REAL(mlp_outputs(2), 4)
+         dSWUPB = REAL(mlp_outputs(3), 4)
+         dSWDNT = REAL(mlp_outputs(4), 4)
+         dSWUPT = REAL(mlp_outputs(5), 4)
+         
+         ! Apply heating: uniform dH_mean to all levels (preserves mass-weighted mean)
          DO k = kts, kte
-            rthratensw(i,k,j) = rthratensw(i,k,j) + REAL(mlp_outputs(1), 4)
+            rthratensw(i,k,j) = rthratensw(i,k,j) + dH_mean
          END DO
          
-         ! [1-4] Flux increments
-         swdnb(i,j) = swdnb(i,j) + REAL(mlp_outputs(2), 4)
-         swupb(i,j) = swupb(i,j) + REAL(mlp_outputs(3), 4)
-         swdnt(i,j) = swdnt(i,j) + REAL(mlp_outputs(4), 4)
-         swupt(i,j) = swupt(i,j) + REAL(mlp_outputs(5), 4)
+         ! Energy closure: scale flux increments for consistency
+         ! Compute column mass M = sum(rho * dz)
+         column_mass = 0.0
+         DO k = kts, kte
+            column_mass = column_mass + rho3d(i,k,j) * dz8w(i,k,j)
+         END DO
+         
+         IF (column_mass > MASS_MIN) THEN
+            ! Net flux change from MLP outputs (W/m2)
+            dF_net = (dSWDNT - dSWUPT) - (dSWDNB - dSWUPB)
+            
+            ! Implied heating from flux change (K/s)
+            dH_from_flux = dF_net / (CP * column_mass)
+            
+            ! Compute scaling factor to match applied heating
+            IF (ABS(dH_from_flux) > TINY) THEN
+               alpha = dH_mean / dH_from_flux
+               ! Clamp to reasonable range to avoid extreme rescaling
+               alpha = MAX(ALPHA_MIN, MIN(ALPHA_MAX, alpha))
+            ELSE
+               ! If flux change is negligible, no scaling needed
+               alpha = 1.0
+            ENDIF
+         ELSE
+            ! If column mass too small, no scaling
+            alpha = 1.0
+         ENDIF
+         
+         ! Apply scaled flux increments
+         swdnb(i,j) = swdnb(i,j) + alpha * dSWDNB
+         swupb(i,j) = swupb(i,j) + alpha * dSWUPB
+         swdnt(i,j) = swdnt(i,j) + alpha * dSWDNT
+         swupt(i,j) = swupt(i,j) + alpha * dSWUPT
          
          ! Update GSW
          gsw(i,j) = swdnb(i,j) - swupb(i,j)
