@@ -2693,10 +2693,13 @@ CONTAINS
              end if
 
 !
-! ====== Cloud-Rad ML Residual Hook (Phase 1 stub) ======
-             IF (config_flags%rad_cloud_ml_opt > 0) THEN
+! ====== Cloud-Rad ML Residual Hook (Phase 1 stub + optional dump) ======
+             IF (config_flags%rad_cloud_ml_opt > 0 .OR. &
+                 config_flags%rad_cloud_ml_dump > 0) THEN
                 CALL cloud_ml_sw_residual(                               &
                      config_flags%rad_cloud_ml_opt,                      &
+                     config_flags%rad_cloud_ml_dump,                     &
+                     itimestep, id,                                      &
                      ids,ide, jds,jde, kds,kde,                          &
                      ims,ime, jms,jme, kms,kme,                          &
                      its,ite, jts,jte, kts,kte,                          &
@@ -2704,7 +2707,8 @@ CONTAINS
                      qv, qc, qi, qs, CLDFRA,                             &
                      COSZR, ALBEDO,                                      &
                      RTHRATENSW,                                         &
-                     SWDNB, SWUPB, SWDNT, SWUPT, GSW                     &
+                     SWDNB, SWUPB, SWDNT, SWUPT, GSW,                    &
+                     RTHRATENSWC, SWDNBC, SWUPBC, SWDNTC, SWUPTC         &
                      )
              ENDIF
 ! ====== End Cloud-Rad ML Residual Hook ======

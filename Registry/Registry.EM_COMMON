@@ -2470,6 +2470,7 @@ rconfig   integer     ra_lw_physics       namelist,physics	max_domains    -1    
 rconfig   integer     ra_sw_physics       namelist,physics	max_domains    -1      rh       "ra_sw_physics"         ""      ""
 rconfig   integer     ra_sw_eclipse       namelist,physics	1              0       rh       "ra_sw_eclipse"         "0/1 flag: 1=turn eclipse on"      ""
 rconfig   integer     rad_cloud_ml_opt    namelist,physics	max_domains    0       rh       "rad_cloud_ml_opt"      "Cloud-rad ML residual: 0=off, 1=stub"      ""
+rconfig   integer     rad_cloud_ml_dump   namelist,physics	max_domains    0       rh       "rad_cloud_ml_dump"     "Cloud-rad ML dump: 0=off, 1=dump training pairs"      ""
 rconfig   integer     ghg_input           namelist,physics	1              1       rh       "ghg_input"             "for CAM, RRTM, RRTMG, RRTMG_fast: 0/1 flag: 0=constant (CO2 is a function of year for RRTM*); 1=time-varying GHG from CAMtr climate file"
 rconfig   real    radt                    namelist,physics	max_domains    0       h    "RADT"          ""      ""
 rconfig   real    naer                    namelist,physics      max_domains    1e9     rh   "NAER"          ""      ""

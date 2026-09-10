@@ -630,6 +630,17 @@ use_rap_aero_icbc                   = .false.   ! Set to .true. to ingest real-t
                                                  (Phase 1: scaffolding only, bit-identical to opt=0)
                                               Note: requires ra_sw_physics = 4 (RRTMG) to have effect.
                                                     Applied after RRTMG SW but before heating rate accumulation.
+
+ rad_cloud_ml_dump (max_dom)         = 0,   ! cloud-radiation ML training data dump option
+                                              0: disabled (default) - no I/O, no behavior change
+                                              1: dump training pairs on radiation steps with cloudy+daylight conditions
+                                              Output: rad_ml_dump_dDDD_tTTTTTTTT.bin (Fortran unformatted binary)
+                                              Fields: timestep, domain id, tile dims, coszen, albedo, 
+                                                      qc/qi/qs, cldfra, rthratensw, SW fluxes (dn/up, bot/top)
+                                              Python reader stub documented in phys/module_ra_cloud_ml.F
+                                              Note: Independent of rad_cloud_ml_opt; can dump with opt=0.
+                                                    Only dumps when coszen > 0.1 and total condensate > 1e-6.
+
  ghg_input                           = 1,   ! Option to read CAMtr_volume_mixing_ratio files of green house gas values,
                                               as of v4.4, the default is SSP 2 with RCP 4.5 => SSP245
                                               Used for CAM LW and SW, RRTM, RRTMG LW and SW, RRTMG_fast LW and SW
