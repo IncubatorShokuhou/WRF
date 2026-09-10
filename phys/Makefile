@@ -146,6 +146,7 @@ MODULES = \
 	module_ra_eclipse.o \
 	module_ra_aerosol.o  \
 	module_ra_farms.o  \
+	module_ra_cloud_ml.o \
 	module_sf_sfclay.o \
 	module_sf_sfclayrev.o \
 	module_sf_gfs.o \

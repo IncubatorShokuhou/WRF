@@ -624,6 +624,12 @@ use_rap_aero_icbc                   = .false.   ! Set to .true. to ingest real-t
                                               1 = latitude-varying decorrelation length
  ra_sw_eclipse                       = 0,   ! eclipse effect on shortwave radiation. 0: off, 1: on. 
                                               Applies to RRTMG, Goddard, old Goddard and Dudhia schemes
+ rad_cloud_ml_opt (max_dom)          = 0,   ! cloud-radiation ML residual correction option
+                                              0: disabled (default) - no ML correction applied
+                                              1: stub enabled - hook active but returns zero corrections
+                                                 (Phase 1: scaffolding only, bit-identical to opt=0)
+                                              Note: requires ra_sw_physics = 4 (RRTMG) to have effect.
+                                                    Applied after RRTMG SW but before heating rate accumulation.
  ghg_input                           = 1,   ! Option to read CAMtr_volume_mixing_ratio files of green house gas values,
                                               as of v4.4, the default is SSP 2 with RCP 4.5 => SSP245
                                               Used for CAM LW and SW, RRTM, RRTMG LW and SW, RRTMG_fast LW and SW

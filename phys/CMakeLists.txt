@@ -172,6 +172,7 @@ target_sources(
                   module_physics_init.F
                   module_progtm.F
                   module_ra_aerosol.F
+                  module_ra_cloud_ml.F
                   module_ra_cam.F
                   module_ra_cam_support.F
                   module_ra_clWRF_support.F

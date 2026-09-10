@@ -316,6 +316,8 @@ CONTAINS
 ! amontornes-bcodina 2015/09 solar eclipses
    USE module_ra_eclipse    , ONLY : solar_eclipse
 
+   USE module_ra_cloud_ml   , ONLY : cloud_ml_sw_residual
+
    !  This driver calls subroutines for the radiation parameterizations.
    !
    !  short wave radiation choices:
@@ -2689,6 +2691,24 @@ CONTAINS
                    END DO
                 END DO
              end if
+
+!
+! ====== Cloud-Rad ML Residual Hook (Phase 1 stub) ======
+             IF (config_flags%rad_cloud_ml_opt > 0) THEN
+                CALL cloud_ml_sw_residual(                               &
+                     config_flags%rad_cloud_ml_opt,                      &
+                     ids,ide, jds,jde, kds,kde,                          &
+                     ims,ime, jms,jme, kms,kme,                          &
+                     its,ite, jts,jte, kts,kte,                          &
+                     t, p, rho, dz8w,                                    &
+                     qv, qc, qi, qs, CLDFRA,                             &
+                     COSZR, ALBEDO,                                      &
+                     RTHRATENSW,                                         &
+                     SWDNB, SWUPB, SWDNT, SWUPT, GSW                     &
+                     )
+             ENDIF
+! ====== End Cloud-Rad ML Residual Hook ======
+!
 
              DO j=jts,jte
              DO k=kts,kte
