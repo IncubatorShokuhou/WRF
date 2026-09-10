@@ -387,9 +387,9 @@ SUBROUTINE load_mlp_weights()
    mlp_scale(:) = weight_buffer(idx:idx+N_FEATURES-1)
    idx = idx + N_FEATURES
    
-   ! W0[6,32] - column-major in buffer
-   DO j = 1, N_HIDDEN1
-      DO i = 1, N_FEATURES
+   ! W0[6,32] - row-major / C-order in buffer (matching Python W.ravel(order='C'))
+   DO i = 1, N_FEATURES
+      DO j = 1, N_HIDDEN1
          mlp_W0(i,j) = weight_buffer(idx)
          idx = idx + 1
       END DO
@@ -399,9 +399,9 @@ SUBROUTINE load_mlp_weights()
    mlp_b0(:) = weight_buffer(idx:idx+N_HIDDEN1-1)
    idx = idx + N_HIDDEN1
    
-   ! W1[32,32]
-   DO j = 1, N_HIDDEN2
-      DO i = 1, N_HIDDEN1
+   ! W1[32,32] - row-major / C-order in buffer
+   DO i = 1, N_HIDDEN1
+      DO j = 1, N_HIDDEN2
          mlp_W1(i,j) = weight_buffer(idx)
          idx = idx + 1
       END DO
@@ -411,9 +411,9 @@ SUBROUTINE load_mlp_weights()
    mlp_b1(:) = weight_buffer(idx:idx+N_HIDDEN2-1)
    idx = idx + N_HIDDEN2
    
-   ! W2[32,5]
-   DO j = 1, N_OUTPUTS
-      DO i = 1, N_HIDDEN2
+   ! W2[32,5] - row-major / C-order in buffer
+   DO i = 1, N_HIDDEN2
+      DO j = 1, N_OUTPUTS
          mlp_W2(i,j) = weight_buffer(idx)
          idx = idx + 1
       END DO
