@@ -96,6 +96,9 @@ CONTAINS
 !     rthratenswc - clear-sky SW heating rate (K/s)
 !     swdnbc, swupbc, swdntc, swuptc - clear-sky fluxes
 !
+!   Optional microphysics effective radii (3D):
+!     re_cloud, re_ice, re_snow - effective radii (microns)
+!
 ! ========================================================================
 SUBROUTINE cloud_ml_sw_residual(                                         &
        rad_cloud_ml_opt, rad_cloud_ml_dump,                              &
@@ -108,7 +111,8 @@ SUBROUTINE cloud_ml_sw_residual(                                         &
        coszr, albedo,                                                    &
        rthratensw,                                                       &
        swdnb, swupb, swdnt, swupt, gsw,                                  &
-       rthratenswc, swdnbc, swupbc, swdntc, swuptc                       &
+       rthratenswc, swdnbc, swupbc, swdntc, swuptc,                      &
+       re_cloud, re_ice, re_snow                                         &
        )
 
    IMPLICIT NONE
@@ -135,11 +139,15 @@ SUBROUTINE cloud_ml_sw_residual(                                         &
    REAL, DIMENSION(ims:ime,jms:jme), OPTIONAL, INTENT(IN) :: &
         swdnbc, swupbc, swdntc, swuptc
 
+   ! Optional microphysics effective radii
+   REAL, DIMENSION(ims:ime,kms:kme,jms:jme), OPTIONAL, INTENT(IN) :: &
+        re_cloud, re_ice, re_snow
+
    ! Local variables
    LOGICAL, SAVE :: first_call = .TRUE.
    LOGICAL, SAVE :: first_dump = .TRUE.
 
-   ! Dump training data if requested
+   ! Dump training data if requested (version 2: includes thermo/micro fields)
    IF (rad_cloud_ml_dump == 1) THEN
       CALL dump_training_data(                                           &
            itimestep, id,                                                &
@@ -149,6 +157,8 @@ SUBROUTINE cloud_ml_sw_residual(                                         &
            qc3d, qi3d, qs3d, cldfra3d,                                   &
            coszr, albedo,                                                &
            rthratensw, swdnb, swupb, swdnt, swupt,                       &
+           t3d, p3d, qv3d, rho3d, dz8w,                                  &
+           re_cloud, re_ice, re_snow,                                    &
            first_dump                                                    &
            )
       first_dump = .FALSE.
@@ -199,14 +209,14 @@ END SUBROUTINE cloud_ml_sw_residual
 ! ========================================================================
 ! SUBROUTINE dump_training_data
 !
-! Purpose: Dump radiation state for ML training
+! Purpose: Dump radiation state for ML training (version 2: expanded fields)
 !          Writes Fortran unformatted binary file with:
-!          - Metadata: timestep, domain id, tile dimensions
+!          - Metadata: timestep, domain id, tile dimensions, format version
 !          - 2D fields: coszen, albedo, SW fluxes
-!          - 3D fields: qc, qi, qs, cldfra, rthratensw
+!          - 3D fields: qc, qi, qs, cldfra, rthratensw, t, p, qv, rho, dz, re_*
 !
-! File format: Fortran unformatted sequential
-!   Record 1: header (timestep, id, its,ite, jts,jte, kts,kte)
+! File format: Fortran unformatted sequential, VERSION 2
+!   Record 1: header (timestep, id, its,ite, jts,jte, kts,kte, version)
 !   Record 2: coszr(its:ite,jts:jte)
 !   Record 3: albedo(its:ite,jts:jte)
 !   Record 4: qc3d(its:ite,kts:kte,jts:jte)
@@ -215,15 +225,27 @@ END SUBROUTINE cloud_ml_sw_residual
 !   Record 7: cldfra3d(its:ite,kts:kte,jts:jte)
 !   Record 8: rthratensw(its:ite,kts:kte,jts:jte)
 !   Record 9: swdnb, swupb, swdnt, swupt (its:ite,jts:jte each)
+!   === VERSION 2 ADDITIONS (Phase-A thermo/micro fields) ===
+!   Record 10: t3d(its:ite,kts:kte,jts:jte)
+!   Record 11: p3d(its:ite,kts:kte,jts:jte)
+!   Record 12: qv3d(its:ite,kts:kte,jts:jte)
+!   Record 13: rho3d(its:ite,kts:kte,jts:jte)
+!   Record 14: dz8w(its:ite,kts:kte,jts:jte)
+!   Record 15: re_cloud(its:ite,kts:kte,jts:jte) if present
+!   Record 16: re_ice(its:ite,kts:kte,jts:jte) if present
+!   Record 17: re_snow(its:ite,kts:kte,jts:jte) if present
 !
-! Python reader stub:
+! Python reader stub (version 2):
 !   import numpy as np
 !   with open('rad_ml_dump_*.bin', 'rb') as f:
-!       header = np.fromfile(f, dtype=np.int32, count=7)
-!       timestep, domid, its, ite, jts, jte, kts, kte = header
+!       header = np.fromfile(f, dtype=np.int32, count=9)
+!       timestep, domid, its, ite, jts, jte, kts, kte, version = header
 !       ni, nj, nk = ite-its+1, jte-jts+1, kte-kts+1
 !       coszr = np.fromfile(f, dtype=np.float32, count=ni*nj).reshape(ni,nj)
-!       # ... similar for other fields
+!       albedo = np.fromfile(f, dtype=np.float32, count=ni*nj).reshape(ni,nj)
+!       qc = np.fromfile(f, dtype=np.float32, count=ni*nk*nj).reshape(ni,nk,nj)
+!       # ... qi, qs, cldfra, rthratensw, SW fluxes
+!       # VERSION 2: t, p, qv, rho, dz, re_cloud, re_ice, re_snow
 !
 ! ========================================================================
 SUBROUTINE dump_training_data(                                           &
@@ -234,6 +256,8 @@ SUBROUTINE dump_training_data(                                           &
        qc3d, qi3d, qs3d, cldfra3d,                                       &
        coszr, albedo,                                                    &
        rthratensw, swdnb, swupb, swdnt, swupt,                           &
+       t3d, p3d, qv3d, rho3d, dz8w,                                      &
+       re_cloud, re_ice, re_snow,                                        &
        first_dump                                                        &
        )
 
@@ -251,12 +275,21 @@ SUBROUTINE dump_training_data(                                           &
    REAL, DIMENSION(ims:ime,jms:jme), INTENT(IN) :: &
         coszr, albedo, swdnb, swupb, swdnt, swupt
 
+   ! Version 2: thermodynamic/microphysics fields
+   REAL, DIMENSION(ims:ime,kms:kme,jms:jme), INTENT(IN) :: &
+        t3d, p3d, qv3d, rho3d, dz8w
+   
+   ! Optional effective radii
+   REAL, DIMENSION(ims:ime,kms:kme,jms:jme), OPTIONAL, INTENT(IN) :: &
+        re_cloud, re_ice, re_snow
+
    LOGICAL, INTENT(IN) :: first_dump
 
    ! Local variables
    CHARACTER(LEN=256) :: filename
    INTEGER :: iunit, ierr
    INTEGER :: i, j, k
+   INTEGER, PARAMETER :: DUMP_VERSION = 2
    LOGICAL :: has_cloudy_daylight
    REAL, PARAMETER :: COSZEN_MIN = 0.1  ! Minimum coszen for "daylight"
    REAL, PARAMETER :: CLOUD_MIN = 1.0E-6  ! Minimum total condensate for "cloudy"
@@ -285,9 +318,10 @@ SUBROUTINE dump_training_data(                                           &
 
    ! Log first dump
    IF (first_dump) THEN
-      WRITE(*,*) 'cloud_ml_dump: Writing training data dumps to rad_ml_dump_*.bin'
+      WRITE(*,*) 'cloud_ml_dump: Writing training data dumps to rad_ml_dump_*.bin (version 2)'
       WRITE(*,*) '  Format: Fortran unformatted sequential'
       WRITE(*,*) '  Fields: timestep, id, dims, coszen, albedo, qc/qi/qs, cldfra, rthratensw, SW fluxes'
+      WRITE(*,*) '  + VERSION 2: t, p, qv, rho, dz, re_cloud, re_ice, re_snow'
    ENDIF
 
    ! Generate filename: rad_ml_dump_dDDD_tTTTTTTTT.bin
@@ -303,8 +337,8 @@ SUBROUTINE dump_training_data(                                           &
       RETURN
    ENDIF
 
-   ! Write header
-   WRITE(iunit, IOSTAT=ierr) itimestep, id, its, ite, jts, jte, kts, kte
+   ! Write header: version 2 includes format version field
+   WRITE(iunit, IOSTAT=ierr) itimestep, id, its, ite, jts, jte, kts, kte, DUMP_VERSION
    IF (ierr /= 0) THEN
       WRITE(*,*) 'WARNING: cloud_ml_dump: Write error (header)'
       CLOSE(iunit)
@@ -328,10 +362,29 @@ SUBROUTINE dump_training_data(                                           &
    WRITE(iunit) ((swdnt(i,j), i=its,ite), j=jts,jte)
    WRITE(iunit) ((swupt(i,j), i=its,ite), j=jts,jte)
 
+   ! === VERSION 2: thermodynamic/microphysics fields ===
+   ! Write 3D thermo fields
+   WRITE(iunit) (((t3d(i,k,j), i=its,ite), k=kts,kte), j=jts,jte)
+   WRITE(iunit) (((p3d(i,k,j), i=its,ite), k=kts,kte), j=jts,jte)
+   WRITE(iunit) (((qv3d(i,k,j), i=its,ite), k=kts,kte), j=jts,jte)
+   WRITE(iunit) (((rho3d(i,k,j), i=its,ite), k=kts,kte), j=jts,jte)
+   WRITE(iunit) (((dz8w(i,k,j), i=its,ite), k=kts,kte), j=jts,jte)
+
+   ! Write effective radii if present
+   IF (PRESENT(re_cloud)) THEN
+      WRITE(iunit) (((re_cloud(i,k,j), i=its,ite), k=kts,kte), j=jts,jte)
+   ENDIF
+   IF (PRESENT(re_ice)) THEN
+      WRITE(iunit) (((re_ice(i,k,j), i=its,ite), k=kts,kte), j=jts,jte)
+   ENDIF
+   IF (PRESENT(re_snow)) THEN
+      WRITE(iunit) (((re_snow(i,k,j), i=its,ite), k=kts,kte), j=jts,jte)
+   ENDIF
+
    CLOSE(iunit)
 
    ! Log successful dump
-   WRITE(*,*) 'cloud_ml_dump: Wrote ', TRIM(filename)
+   WRITE(*,*) 'cloud_ml_dump: Wrote ', TRIM(filename), ' (version 2)'
 
 END SUBROUTINE dump_training_data
 

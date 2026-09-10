@@ -2708,7 +2708,8 @@ CONTAINS
                      COSZR, ALBEDO,                                      &
                      RTHRATENSW,                                         &
                      SWDNB, SWUPB, SWDNT, SWUPT, GSW,                    &
-                     RTHRATENSWC, SWDNBC, SWUPBC, SWDNTC, SWUPTC         &
+                     RTHRATENSWC, SWDNBC, SWUPBC, SWDNTC, SWUPTC,        &
+                     re_cloud, re_ice, re_snow                           &
                      )
              ENDIF
 ! ====== End Cloud-Rad ML Residual Hook ======
